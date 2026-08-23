@@ -121,7 +121,18 @@ BINARY_PATH="$(find_binary)"
 readonly BINARY_PATH
 BINARY_DIR="$(dirname -- "$BINARY_PATH")"
 readonly BINARY_DIR
-PLUGIN_PATH="$BINARY_DIR/librexgpu-xenos.so"
+case "$BINARY_DIR" in
+  *linux-*-debug)
+    GPU_PLUGIN_NAME="librexgpu-xenosd.so"
+    ;;
+  *linux-*-relwithdebinfo)
+    GPU_PLUGIN_NAME="librexgpu-xenosrd.so"
+    ;;
+  *)
+    GPU_PLUGIN_NAME="librexgpu-xenos.so"
+    ;;
+esac
+PLUGIN_PATH="$BINARY_DIR/$GPU_PLUGIN_NAME"
 [[ -f "$PLUGIN_PATH" ]] ||
   saw2_die "Xenos plugin is not colocated with the executable: $PLUGIN_PATH"
 

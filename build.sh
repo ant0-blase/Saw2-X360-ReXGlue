@@ -360,19 +360,34 @@ find_sdk_library() {
   find "$SAW2_SDK_PREFIX" -type f -name "$library_name" -print -quit 2>/dev/null
 }
 
+case "$BUILD_KIND" in
+  debug)
+    GPU_PLUGIN_NAME="librexgpu-xenosd.so"
+    ;;
+  relwithdebinfo)
+    GPU_PLUGIN_NAME="librexgpu-xenosrd.so"
+    ;;
+  release)
+    GPU_PLUGIN_NAME="librexgpu-xenos.so"
+    ;;
+  *)
+    saw2_die "unsupported build kind while selecting Xenos plugin: $BUILD_KIND"
+    ;;
+esac
+
 RUNTIME_PATH="$(find_sdk_library librexruntime.so || true)"
-PLUGIN_PATH="$(find_sdk_library librexgpu-xenos.so || true)"
+PLUGIN_PATH="$(find_sdk_library "$GPU_PLUGIN_NAME" || true)"
 [[ -x "$BINARY_PATH" ]] || saw2_die "build produced no executable: $BINARY_PATH"
 [[ -n "$RUNTIME_PATH" && -f "$RUNTIME_PATH" ]] ||
   saw2_die "selected SDK has no librexruntime.so: $SAW2_SDK_PREFIX"
 [[ -n "$PLUGIN_PATH" && -f "$PLUGIN_PATH" ]] ||
-  saw2_die "selected SDK has no librexgpu-xenos.so: $SAW2_SDK_PREFIX"
+  saw2_die "selected SDK has no $GPU_PLUGIN_NAME for $BUILD_KIND: $SAW2_SDK_PREFIX"
 saw2_info "ReXGlue runtime: $RUNTIME_PATH"
-saw2_info "Xenos plugin: $PLUGIN_PATH"
+saw2_info "Xenos plugin ($BUILD_KIND): $PLUGIN_PATH"
 
 mkdir -p -- "$STAGE_DIR"
 saw2_run install -m 0755 "$BINARY_PATH" "$STAGE_DIR/saw2"
-saw2_run install -m 0755 "$PLUGIN_PATH" "$STAGE_DIR/librexgpu-xenos.so"
+saw2_run install -m 0755 "$PLUGIN_PATH" "$STAGE_DIR/$GPU_PLUGIN_NAME"
 saw2_run install -m 0755 "$RUNTIME_PATH" "$STAGE_DIR/librexruntime.so"
 if [[ -L "$ROOT_DIR/out/stage/current" || ! -e "$ROOT_DIR/out/stage/current" ]]; then
   saw2_run ln -sfn "$PRESET" "$ROOT_DIR/out/stage/current"

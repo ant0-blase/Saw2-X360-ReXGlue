@@ -1,0 +1,48 @@
+# Build output
+out/
+build/
+
+# Local ReXGlue SDK / dependencies
+.deps/
+thirdparty/rexglue-sdk/
+
+# Generated recompilation output
+generated/default/
+
+# Retail game files (never commit them)
+game/*
+!game/README.md
+
+# Runtime logs, captures and traces
+logs/*
+!logs/README.md
+*.log
+*.trace
+*.csv
+*.ppm
+*.core
+core
+core.*
+*.gdb
+
+# Runtime-local writable data / shader caches
+cache/
+user/
+content/
+
+# Local CMake / IDE state
+CMakeUserPresets.json
+CMakeFiles/
+CMakeCache.txt
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Python
+__pycache__/
+*.py[cod]
+
+# OS
+.DS_Store
+Thumbs.db

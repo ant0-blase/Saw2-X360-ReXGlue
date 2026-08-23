@@ -1,0 +1,24 @@
+name: Validate repository
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: |
+          bash -n build.sh run.sh test-boot.sh gdb.sh
+          bash -n scripts/*.sh
+      - name: Validate Python and project metadata
+        run: |
+          python3 -m py_compile scripts/inspect-xex.py
+          python3 - <<'PY'
+          import json, tomllib
+          from pathlib import Path
+          json.loads(Path('CMakePresets.json').read_text())
+          tomllib.loads(Path('saw2_manifest.toml').read_text())
+          PY

@@ -341,12 +341,34 @@ fi
 saw2_run "${build_command[@]}"
 
 BINARY_PATH="$BUILD_DIR/saw2"
-PLUGIN_PATH="$BUILD_DIR/librexgpu-xenos.so"
-RUNTIME_PATH="$SAW2_SDK_PREFIX/lib/librexruntime.so"
-[[ -f "$RUNTIME_PATH" ]] || RUNTIME_PATH="$SAW2_SDK_PREFIX/lib64/librexruntime.so"
+
+# ReXGlue 0.10 ships the runtime and Xenos backend as SDK libraries.
+# The game target itself only links the executable; it does not rebuild
+# librexgpu-xenos.so in the project build directory. Resolve both shared
+# libraries from the selected SDK and stage them beside the executable.
+find_sdk_library() {
+  local library_name="$1"
+  local candidate=""
+  for candidate in \
+    "$SAW2_SDK_PREFIX/lib/$library_name" \
+    "$SAW2_SDK_PREFIX/lib64/$library_name"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  find "$SAW2_SDK_PREFIX" -type f -name "$library_name" -print -quit 2>/dev/null
+}
+
+RUNTIME_PATH="$(find_sdk_library librexruntime.so || true)"
+PLUGIN_PATH="$(find_sdk_library librexgpu-xenos.so || true)"
 [[ -x "$BINARY_PATH" ]] || saw2_die "build produced no executable: $BINARY_PATH"
-[[ -f "$PLUGIN_PATH" ]] || saw2_die "build produced no Xenos plugin: $PLUGIN_PATH"
-[[ -f "$RUNTIME_PATH" ]] || saw2_die "selected SDK has no librexruntime.so"
+[[ -n "$RUNTIME_PATH" && -f "$RUNTIME_PATH" ]] ||
+  saw2_die "selected SDK has no librexruntime.so: $SAW2_SDK_PREFIX"
+[[ -n "$PLUGIN_PATH" && -f "$PLUGIN_PATH" ]] ||
+  saw2_die "selected SDK has no librexgpu-xenos.so: $SAW2_SDK_PREFIX"
+saw2_info "ReXGlue runtime: $RUNTIME_PATH"
+saw2_info "Xenos plugin: $PLUGIN_PATH"
 
 mkdir -p -- "$STAGE_DIR"
 saw2_run install -m 0755 "$BINARY_PATH" "$STAGE_DIR/saw2"

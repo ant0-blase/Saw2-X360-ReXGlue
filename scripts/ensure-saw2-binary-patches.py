@@ -4,7 +4,6 @@
 #   REXGLUE_BINARY_PATCHES="ADDRESS:HEXBYTES,ADDRESS:HEXBYTES,..."
 
 from pathlib import Path
-import shutil
 import sys
 
 if len(sys.argv) != 2:
@@ -19,10 +18,6 @@ for path in (header, source, project):
     if not path.is_file():
         raise SystemExit(f"[saw2-patches] missing ReXGlue source: {path}")
 
-def backup_once(path: Path) -> None:
-    backup = path.with_suffix(path.suffix + ".saw2-binary-patches.bak")
-    if not backup.exists():
-        shutil.copy2(path, backup)
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     if new in text:
@@ -34,7 +29,6 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 # BinaryView public patch API.
 text = header.read_text(encoding="utf-8")
 if "bool patch(uint32_t address" not in text:
-    backup_once(header)
     text = replace_once(
         text,
         "  const uint8_t* translate(uint32_t addr) const;\n"
@@ -49,7 +43,6 @@ if "bool patch(uint32_t address" not in text:
 # BinaryView mutation implementation.
 text = source.read_text(encoding="utf-8")
 if "bool BinaryView::patch(uint32_t address" not in text:
-    backup_once(source)
     if "#include <algorithm>\n" not in text:
         text = replace_once(
             text,
@@ -103,7 +96,6 @@ if "bool BinaryView::patch(uint32_t address" not in text:
 # Project recompiler: parse env, patch BinaryView before analysis, fingerprint it.
 text = project.read_text(encoding="utf-8")
 if "ApplyEnvironmentBinaryPatches" not in text:
-    backup_once(project)
 
     if "#include <cstdlib>\n" not in text:
         text = replace_once(

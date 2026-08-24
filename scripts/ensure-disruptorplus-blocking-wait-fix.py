@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import shutil
 import sys
 
 if len(sys.argv) != 2:
@@ -20,10 +19,6 @@ header = (
 
 if not header.is_file():
     raise SystemExit(f"[disruptorplus] missing header: {header}")
-
-backup = header.with_suffix(header.suffix + ".condvar-order.bak")
-if not backup.exists():
-    shutil.copy2(header, backup)
 
 text = header.read_text(encoding="utf-8")
 before = text

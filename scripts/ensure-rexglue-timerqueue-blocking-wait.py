@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import shutil
 import sys
 
 if len(sys.argv) != 2:
@@ -11,10 +10,6 @@ src = sdk / "src/core/timer_queue.cpp"
 
 if not src.is_file():
     raise SystemExit(f"[timerqueue] missing source: {src}")
-
-backup = src.with_suffix(src.suffix + ".timerqueue-blocking.bak")
-if not backup.exists():
-    shutil.copy2(src, backup)
 
 text = src.read_text(encoding="utf-8")
 before = text

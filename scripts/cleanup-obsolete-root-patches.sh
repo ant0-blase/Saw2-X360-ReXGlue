@@ -29,3 +29,15 @@ done
 if ((removed == 0)); then
   printf '[saw2] root patch cleanup: already clean\n'
 fi
+
+# Old helper revisions also left local backup files inside .deps/rexglue-sdk.
+# They are never required and one could otherwise be copied into the SDK install.
+SDK_DIR="$ROOT_DIR/.deps/rexglue-sdk"
+if [[ -d "$SDK_DIR" ]]; then
+  find "$SDK_DIR" -type f \
+    \( -name '*.saw2-binary-patches.bak' \
+       -o -name '*.timerqueue-blocking.bak' \
+       -o -name '*.condvar-order.bak' \
+       -o -name '*.db16cyc-noop.bak' \) \
+    -delete 2>/dev/null || true
+fi

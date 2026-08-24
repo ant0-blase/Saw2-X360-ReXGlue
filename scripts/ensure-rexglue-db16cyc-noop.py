@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import re
-import shutil
 import sys
 
 if len(sys.argv) != 2:
@@ -12,10 +11,6 @@ src = sdk / "src" / "codegen" / "builders" / "system.cpp"
 
 if not src.is_file():
     raise SystemExit(f"[db16cyc] missing source: {src}")
-
-backup = src.with_suffix(src.suffix + ".db16cyc-noop.bak")
-if not backup.exists():
-    shutil.copy2(src, backup)
 
 text = src.read_text(encoding="utf-8")
 

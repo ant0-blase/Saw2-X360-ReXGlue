@@ -55,6 +55,11 @@ while (($#)); do
       RESOLUTION_REQUEST="$2"
       shift
       ;;
+    --ue3-msaa-fix)
+      require_value "$1" "${2:-}"
+      SAW2_UE3_MSAA_FIX="$2"
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     --)
       shift
@@ -131,6 +136,7 @@ RUNTIME_PATH="$BINARY_DIR/$RUNTIME_NAME"
   saw2_die "local ReXGlue runtime missing beside executable: $RUNTIME_PATH"
 
 export LD_LIBRARY_PATH="$BINARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 
 valid_resolution() {
   [[ "$1" =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]]

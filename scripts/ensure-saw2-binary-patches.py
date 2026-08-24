@@ -5,7 +5,6 @@
 
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 
 if len(sys.argv) != 2:
@@ -250,20 +249,4 @@ for path, needles in {
     if missing:
         raise SystemExit(f"[saw2-patches] sanity check failed for {path}: {missing}")
 
-try:
-    diff = subprocess.run(
-        [
-            "git", "-C", str(sdk), "diff", "--",
-            "include/rex/codegen/binary_view.h",
-            "src/codegen/binary_view.cpp",
-            "src/codegen/project_recompiler.cpp",
-        ],
-        check=True, text=True, stdout=subprocess.PIPE
-    ).stdout
-    out = Path.cwd() / "ReXGlue-saw2-binary-patches.patch"
-    out.write_text(diff, encoding="utf-8")
-    print(f"[saw2-patches] generated {out}")
-except Exception as exc:
-    print(f"[saw2-patches] warning: could not save git diff: {exc}", file=sys.stderr)
-
-print("[saw2-patches] ReXGlue codegen binary patch support: OK")
+print("[saw2-patches] ReXGlue codegen binary patch support: OK (no root patch generated)")

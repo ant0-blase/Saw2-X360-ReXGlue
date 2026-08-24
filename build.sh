@@ -11,8 +11,11 @@ INSTALL_DEPS=0
 JOBS="${SAW2_BUILD_JOBS:-}"
 
 readonly SDK_SOURCE="$ROOT_DIR/.deps/rexglue-sdk"
-readonly SDK_PATCH="$ROOT_DIR/ReXGlue-db16cyc-pause.patch"
 readonly SDK_BINARY_PATCH_HELPER="$ROOT_DIR/scripts/ensure-saw2-binary-patches.py"
+readonly SDK_TIMERQUEUE_HELPER="$ROOT_DIR/scripts/ensure-rexglue-timerqueue-blocking-wait.py"
+readonly SDK_DISRUPTOR_HELPER="$ROOT_DIR/scripts/ensure-disruptorplus-blocking-wait-fix.py"
+readonly SDK_DB16_NOOP_HELPER="$ROOT_DIR/scripts/ensure-rexglue-db16cyc-noop.py"
+readonly ROOT_PATCH_CLEANUP="$ROOT_DIR/scripts/cleanup-obsolete-root-patches.sh"
 
 usage() {
   cat <<'EOF'
@@ -30,8 +33,9 @@ Build configuration:
 This build always uses:
   .deps/rexglue-sdk
 
-The pinned ReXGlue revision is taken from scripts/common.sh and the local
-ReXGlue-db16cyc-pause.patch is applied automatically once.
+The pinned ReXGlue revision is taken from scripts/common.sh.
+ReXGlue compatibility/optimization fixes are applied idempotently by scripts/
+and no generated .patch files are required or created in the project root.
 EOF
 }
 
@@ -173,10 +177,19 @@ saw2_verify_xex
 [[ -f "$SAW2_MANIFEST" ]] || saw2_die "missing saw2_manifest.toml"
 [[ -f "$ROOT_DIR/generated/rexglue.cmake" ]] ||
   saw2_die "missing generated/rexglue.cmake scaffold"
-[[ -f "$SDK_PATCH" ]] ||
-  saw2_die "missing patch: $SDK_PATCH"
 [[ -f "$SDK_BINARY_PATCH_HELPER" ]] ||
   saw2_die "missing helper: $SDK_BINARY_PATCH_HELPER"
+[[ -f "$SDK_TIMERQUEUE_HELPER" ]] ||
+  saw2_die "missing helper: $SDK_TIMERQUEUE_HELPER"
+[[ -f "$SDK_DISRUPTOR_HELPER" ]] ||
+  saw2_die "missing helper: $SDK_DISRUPTOR_HELPER"
+[[ -f "$SDK_DB16_NOOP_HELPER" ]] ||
+  saw2_die "missing helper: $SDK_DB16_NOOP_HELPER"
+[[ -f "$ROOT_PATCH_CLEANUP" ]] ||
+  saw2_die "missing helper: $ROOT_PATCH_CLEANUP"
+
+saw2_info "cleaning obsolete generated .patch files from project root"
+saw2_run "$ROOT_PATCH_CLEANUP"
 
 mkdir -p "$ROOT_DIR/.deps"
 
@@ -197,25 +210,32 @@ saw2_run git -C "$SDK_SOURCE" submodule update --init --recursive
 saw2_info "ensuring ReXGlue pre-codegen binary patch support"
 saw2_run python3 "$SDK_BINARY_PATCH_HELPER" "$SDK_SOURCE"
 
-SDK_SYSTEM_CPP="$SDK_SOURCE/src/codegen/builders/system.cpp"
-if grep -Eq '__builtin_ia32_pause|_mm_pause|__asm__.*pause|__asm__.*yield' "$SDK_SYSTEM_CPP" 2>/dev/null; then
-  saw2_info "ReXGlue db16cyc patch: pause/yield already present"
-elif git -C "$SDK_SOURCE" apply --reverse --check "$SDK_PATCH" >/dev/null 2>&1; then
-  saw2_info "ReXGlue db16cyc patch: already applied"
-elif git -C "$SDK_SOURCE" apply --check "$SDK_PATCH" >/dev/null 2>&1; then
-  saw2_info "applying ReXGlue db16cyc pause patch"
-  saw2_run git -C "$SDK_SOURCE" apply "$SDK_PATCH"
-else
-  saw2_die "ReXGlue db16cyc patch is neither applicable nor already present"
-fi
+saw2_info "ensuring ReXGlue TimerQueue blocking wait"
+saw2_run python3 "$SDK_TIMERQUEUE_HELPER" "$SDK_SOURCE"
+
+saw2_info "fixing vendored Disruptor++ blocking wait"
+saw2_run python3 "$SDK_DISRUPTOR_HELPER" "$SDK_SOURCE"
+
+saw2_info "restoring ReXGlue db16cyc codegen no-op"
+saw2_run python3 "$SDK_DB16_NOOP_HELPER" "$SDK_SOURCE"
 
 readonly SDK_PREFIX="$SDK_SOURCE/out/install/$SAW2_SDK_PRESET"
 
+case "$BUILD_KIND" in
+  debug) SDK_CMAKE_CONFIG="Debug" ;;
+  relwithdebinfo) SDK_CMAKE_CONFIG="RelWithDebInfo" ;;
+  release) SDK_CMAKE_CONFIG="Release" ;;
+  *) saw2_die "unsupported SDK build kind: $BUILD_KIND" ;;
+esac
+readonly SDK_CMAKE_CONFIG
+
 saw2_info "building local ReXGlue SDK: $SDK_SOURCE"
+saw2_info "ReXGlue SDK configuration: $SDK_CMAKE_CONFIG"
 saw2_run cmake --preset "$SAW2_SDK_PRESET" -S "$SDK_SOURCE" \
   -DCMAKE_C_COMPILER:FILEPATH="$CLANG_C" \
   -DCMAKE_CXX_COMPILER:FILEPATH="$CLANG_CXX"
 saw2_run cmake --build "$SDK_SOURCE/out/build/$SAW2_SDK_PRESET" \
+  --config "$SDK_CMAKE_CONFIG" \
   --target install --parallel "$JOBS"
 
 readonly REXGLUE_CLI="$SDK_PREFIX/bin/rexglue"
@@ -273,8 +293,9 @@ CODEGEN_LOG="$ROOT_DIR/logs/codegen-$(saw2_timestamp)-$$.log"
 saw2_info "build log: $BUILD_LOG"
 exec > >(tee "$BUILD_LOG") 2>&1
 
+saw2_info "forcing codegen regeneration (db16cyc no-op / local SDK changes)"
 saw2_run "$REXGLUE_CLI" --log-level info --log-file "$CODEGEN_LOG" \
-  codegen "$SAW2_MANIFEST"
+  codegen --ignore-stamp "$SAW2_MANIFEST"
 
 declare -a configure_extra=(
   -DCMAKE_C_COMPILER:FILEPATH="$CLANG_C"

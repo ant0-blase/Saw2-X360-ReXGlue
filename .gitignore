@@ -24,6 +24,7 @@ logs/*
 core
 core.*
 *.gdb
+profiling/
 
 # Runtime-local writable data / shader caches
 cache/

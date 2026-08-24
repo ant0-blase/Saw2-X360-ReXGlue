@@ -7,35 +7,31 @@ source "$ROOT_DIR/scripts/common.sh"
 
 BUILD_KIND="relwithdebinfo"
 CLEAN=0
-CHECK_ONLY=0
 INSTALL_DEPS=0
-BOOTSTRAP_SDK=0
-SDK_SOURCE="${REXSDK_DIR:-}"
-SDK_PREFIX_OVERRIDE="${REXGLUE_SDK_PREFIX:-${REXGLUE_PREFIX:-}}"
 JOBS="${SAW2_BUILD_JOBS:-}"
+
+readonly SDK_SOURCE="$ROOT_DIR/.deps/rexglue-sdk"
+readonly SDK_PATCH="$ROOT_DIR/ReXGlue-db16cyc-pause.patch"
+readonly SDK_BINARY_PATCH_HELPER="$ROOT_DIR/scripts/ensure-saw2-binary-patches.py"
 
 usage() {
   cat <<'EOF'
 Usage: ./build.sh [options]
 
 Build configuration:
-  --debug                 Build Debug
-  --relwithdebinfo        Build RelWithDebInfo (default)
-  --release               Build Release
-  --clean                 Fresh CMake configure and clean-first build
+  --debug           Build Debug
+  --relwithdebinfo  Build RelWithDebInfo (default)
+  --release         Build Release
+  --clean           Fresh Saw II CMake configure + clean-first build
+  --install-deps    Install missing host dependencies
+  --jobs N          Parallel build jobs
+  -h, --help        Show this help
 
-Environment and SDK:
-  --check                 Validate the environment only
-  --install-deps          Authorize installing missing distro packages
-  --bootstrap-sdk         Clone/build the pinned ReXGlue SDK under .deps/
-  --sdk-prefix PATH       Use one coherent installed ReXGlue prefix
-  --sdk-source PATH       Build/install ReXGlue from this source tree
-  --jobs N                Parallel build jobs
-  -h, --help              Show this help
+This build always uses:
+  .deps/rexglue-sdk
 
-Environment equivalents: REXGLUE_SDK_PREFIX (or REXGLUE_PREFIX), REXSDK_DIR.
-No package installation or download occurs without explicit permission (or an
-interactive confirmation).
+The pinned ReXGlue revision is taken from scripts/common.sh and the local
+ReXGlue-db16cyc-pause.patch is applied automatically once.
 EOF
 }
 
@@ -49,19 +45,7 @@ while (($#)); do
     --relwithdebinfo) BUILD_KIND="relwithdebinfo" ;;
     --release) BUILD_KIND="release" ;;
     --clean) CLEAN=1 ;;
-    --check) CHECK_ONLY=1 ;;
     --install-deps) INSTALL_DEPS=1 ;;
-    --bootstrap-sdk) BOOTSTRAP_SDK=1 ;;
-    --sdk-prefix)
-      require_value "$1" "${2:-}"
-      SDK_PREFIX_OVERRIDE="$2"
-      shift
-      ;;
-    --sdk-source)
-      require_value "$1" "${2:-}"
-      SDK_SOURCE="$2"
-      shift
-      ;;
     --jobs)
       require_value "$1" "${2:-}"
       JOBS="$2"
@@ -75,9 +59,11 @@ done
 
 [[ "$SAW2_HOST_ARCH" != "unsupported" ]] ||
   saw2_die "unsupported host architecture: $(uname -m)"
+
 if [[ -n "$JOBS" && ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
   saw2_die "--jobs must be a positive integer"
 fi
+
 if [[ -z "$JOBS" ]]; then
   if command -v nproc >/dev/null 2>&1; then
     JOBS="$(nproc)"
@@ -89,18 +75,6 @@ fi
 readonly PRESET="linux-$SAW2_HOST_ARCH-$BUILD_KIND"
 readonly BUILD_DIR="$ROOT_DIR/out/build/$PRESET"
 readonly STAGE_DIR="$ROOT_DIR/out/stage/$PRESET"
-
-DISTRO_ID="unknown"
-DISTRO_LIKE=""
-if [[ -r /etc/os-release ]]; then
-  # shellcheck disable=SC1091
-  source /etc/os-release
-  DISTRO_ID="${ID:-unknown}"
-  DISTRO_LIKE="${ID_LIKE:-}"
-fi
-saw2_info "host distribution: $DISTRO_ID${DISTRO_LIKE:+ (like $DISTRO_LIKE)}"
-saw2_info "host architecture: $SAW2_HOST_ARCH"
-saw2_info "configuration: $BUILD_KIND"
 
 version_major() {
   "$1" --version 2>/dev/null | sed -nE '1{s/.*version ([0-9]+).*/\1/p;q;}'
@@ -136,107 +110,60 @@ library_available() {
 }
 
 declare -a MISSING_REQUIREMENTS=()
+
 check_host_requirements() {
-  local command_name cmake_version cmake_major cmake_minor
+  local command_name
   MISSING_REQUIREMENTS=()
-  for command_name in cmake ninja git python3 sha256sum; do
+
+  for command_name in cmake ninja git python3 sha256sum pkg-config; do
     command -v "$command_name" >/dev/null 2>&1 ||
       MISSING_REQUIREMENTS+=("command:$command_name")
   done
-
-  if command -v cmake >/dev/null 2>&1; then
-    cmake_version="$(cmake --version | sed -nE '1{s/[^0-9]*([0-9]+)\.([0-9]+).*/\1.\2/p;q;}')"
-    cmake_major="${cmake_version%%.*}"
-    cmake_minor="${cmake_version#*.}"
-    if [[ ! "$cmake_major" =~ ^[0-9]+$ ]] ||
-       ((cmake_major < 3 || (cmake_major == 3 && cmake_minor < 25))); then
-      MISSING_REQUIREMENTS+=("CMake>=3.25")
-    fi
-  fi
 
   select_clang
   if [[ -z "$CLANG_CXX" ]] || ((CLANG_MAJOR < 18)); then
     MISSING_REQUIREMENTS+=("Clang>=18")
   fi
-  command -v ld.lld >/dev/null 2>&1 ||
-    saw2_warn "ld.lld is unavailable; the system linker will be used"
 
   for command_name in libvulkan.so.1 libX11.so.6 libX11-xcb.so.1 libxcb.so.1 \
     libwayland-client.so.0; do
     library_available "$command_name" ||
       MISSING_REQUIREMENTS+=("runtime-library:$command_name")
   done
-
-  if ((BOOTSTRAP_SDK)) || [[ -n "$SDK_SOURCE" ]]; then
-    command -v pkg-config >/dev/null 2>&1 ||
-      MISSING_REQUIREMENTS+=("command:pkg-config")
-    for command_name in x11-xcb wayland-client alsa libpulse libpipewire-0.3; do
-      if command -v pkg-config >/dev/null 2>&1 &&
-         ! pkg-config --exists "$command_name"; then
-        MISSING_REQUIREMENTS+=("development-package:$command_name")
-      fi
-    done
-  fi
 }
 
-dependency_command() {
-  local -n output_ref="$1"
-  local -a privilege=()
+install_arch_deps() {
+  local -a cmd=()
   if ((EUID != 0)); then
-    command -v sudo >/dev/null 2>&1 || return 1
-    privilege=(sudo)
+    command -v sudo >/dev/null 2>&1 || saw2_die "sudo is required"
+    cmd+=(sudo)
   fi
-  case " $DISTRO_ID $DISTRO_LIKE " in
-    *" arch "*)
-      output_ref=("${privilege[@]}" pacman -S --needed --
-        base-devel cmake ninja clang lld git python pkgconf curl unzip autoconf
-        gtk3 libx11 libxss vulkan-headers vulkan-icd-loader wayland
-        wayland-protocols libxkbcommon libdecor alsa-lib libpulse pipewire)
-      ;;
-    *" debian "*|*" ubuntu "*)
-      output_ref=("${privilege[@]}" apt-get install -y
-        cmake ninja-build clang lld git python3 python3-venv pkg-config
-        build-essential curl unzip autoconf libgtk-3-dev libx11-xcb-dev
-        libxss-dev libvulkan-dev libwayland-dev libwayland-bin
-        wayland-protocols libxkbcommon-dev libdecor-0-dev libasound2-dev
-        libpulse-dev libpipewire-0.3-dev)
-      ;;
-    *" fedora "*|*" rhel "*)
-      output_ref=("${privilege[@]}" dnf install -y
-        cmake ninja-build clang lld git python3 pkgconf-pkg-config gcc-c++
-        curl unzip autoconf gtk3-devel libX11-devel libXScrnSaver-devel
-        vulkan-headers vulkan-loader-devel wayland-devel wayland-protocols-devel
-        libxkbcommon-devel libdecor-devel alsa-lib-devel
-        pulseaudio-libs-devel pipewire-devel)
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-offer_dependency_install() {
-  ((${#MISSING_REQUIREMENTS[@]})) || return 0
-  local answer=""
-  local install_now="$INSTALL_DEPS"
-  local -a install_command=()
-  saw2_warn "missing host requirements: ${MISSING_REQUIREMENTS[*]}"
-  dependency_command install_command ||
-    saw2_die "unsupported distribution; install the requirements above manually"
-  saw2_info "suggested dependency command:"
-  saw2_print_command "${install_command[@]}"
-  if ((!install_now)) && [[ -t 0 && -t 1 ]]; then
-    read -r -p '[saw2] Install these packages now? [y/N] ' answer
-    [[ "$answer" =~ ^[Yy]$ ]] && install_now=1
-  fi
-  ((install_now)) ||
-    saw2_die "dependencies not installed (use --install-deps to authorize it)"
-  saw2_run "${install_command[@]}"
-  check_host_requirements
-  ((${#MISSING_REQUIREMENTS[@]} == 0)) ||
-    saw2_die "requirements remain missing: ${MISSING_REQUIREMENTS[*]}"
+  cmd+=(pacman -S --needed --
+    base-devel cmake ninja clang lld git python pkgconf curl unzip autoconf
+    gtk3 libx11 libxss vulkan-headers vulkan-icd-loader wayland
+    wayland-protocols libxkbcommon libdecor alsa-lib libpulse pipewire)
+  saw2_run "${cmd[@]}"
 }
 
 check_host_requirements
-offer_dependency_install
+if ((${#MISSING_REQUIREMENTS[@]})); then
+  saw2_warn "missing host requirements: ${MISSING_REQUIREMENTS[*]}"
+  if ((INSTALL_DEPS)); then
+    if [[ -r /etc/os-release ]]; then
+      # shellcheck disable=SC1091
+      source /etc/os-release
+    fi
+    case " ${ID:-} ${ID_LIKE:-} " in
+      *" arch "*) install_arch_deps ;;
+      *) saw2_die "automatic --install-deps is currently configured for Arch only" ;;
+    esac
+    check_host_requirements
+  fi
+fi
+
+((${#MISSING_REQUIREMENTS[@]} == 0)) ||
+  saw2_die "missing requirements: ${MISSING_REQUIREMENTS[*]}"
+
 saw2_info "compiler: $CLANG_CXX (Clang $CLANG_MAJOR)"
 saw2_info "CMake: $(cmake --version | sed -n '1p')"
 saw2_verify_xex
@@ -246,69 +173,99 @@ saw2_verify_xex
 [[ -f "$SAW2_MANIFEST" ]] || saw2_die "missing saw2_manifest.toml"
 [[ -f "$ROOT_DIR/generated/rexglue.cmake" ]] ||
   saw2_die "missing generated/rexglue.cmake scaffold"
+[[ -f "$SDK_PATCH" ]] ||
+  saw2_die "missing patch: $SDK_PATCH"
+[[ -f "$SDK_BINARY_PATCH_HELPER" ]] ||
+  saw2_die "missing helper: $SDK_BINARY_PATCH_HELPER"
 
-if [[ -e "$ROOT_DIR/.git" && -f "$ROOT_DIR/.gitmodules" ]]; then
-  if ((CHECK_ONLY)); then
-    saw2_info "project submodules: declared (initialization skipped by --check)"
-  else
-    saw2_info "initializing Saw II project submodules"
-    saw2_run git -C "$ROOT_DIR" submodule update --init --recursive
-  fi
+mkdir -p "$ROOT_DIR/.deps"
+
+if [[ ! -d "$SDK_SOURCE/.git" ]]; then
+  saw2_info "cloning pinned ReXGlue SDK into .deps/rexglue-sdk"
+  saw2_run git clone --recursive "$SAW2_REXGLUE_REPOSITORY" "$SDK_SOURCE"
+fi
+
+sdk_head="$(git -C "$SDK_SOURCE" rev-parse HEAD 2>/dev/null || true)"
+if [[ "$sdk_head" != "$SAW2_REXGLUE_COMMIT" && "$sdk_head" != "$SAW2_REXGLUE_COMMIT"* ]]; then
+  saw2_info "checking out pinned ReXGlue revision: $SAW2_REXGLUE_COMMIT"
+  saw2_run git -C "$SDK_SOURCE" fetch --all --tags
+  saw2_run git -C "$SDK_SOURCE" checkout --detach "$SAW2_REXGLUE_COMMIT"
+fi
+
+saw2_run git -C "$SDK_SOURCE" submodule update --init --recursive
+
+saw2_info "ensuring ReXGlue pre-codegen binary patch support"
+saw2_run python3 "$SDK_BINARY_PATCH_HELPER" "$SDK_SOURCE"
+
+SDK_SYSTEM_CPP="$SDK_SOURCE/src/codegen/builders/system.cpp"
+if grep -Eq '__builtin_ia32_pause|_mm_pause|__asm__.*pause|__asm__.*yield' "$SDK_SYSTEM_CPP" 2>/dev/null; then
+  saw2_info "ReXGlue db16cyc patch: pause/yield already present"
+elif git -C "$SDK_SOURCE" apply --reverse --check "$SDK_PATCH" >/dev/null 2>&1; then
+  saw2_info "ReXGlue db16cyc patch: already applied"
+elif git -C "$SDK_SOURCE" apply --check "$SDK_PATCH" >/dev/null 2>&1; then
+  saw2_info "applying ReXGlue db16cyc pause patch"
+  saw2_run git -C "$SDK_SOURCE" apply "$SDK_PATCH"
 else
-  saw2_info "project submodules: none"
+  saw2_die "ReXGlue db16cyc patch is neither applicable nor already present"
 fi
 
-build_sdk_source() {
-  local source_dir="$1"
-  local install_prefix="$source_dir/out/install/$SAW2_SDK_PRESET"
-  [[ -f "$source_dir/CMakeLists.txt" && -f "$source_dir/CMakePresets.json" ]] ||
-    saw2_die "not a ReXGlue SDK source tree: $source_dir"
-  if [[ -e "$source_dir/.git" ]]; then
-    saw2_run git -C "$source_dir" submodule update --init --recursive
-  fi
-  saw2_run cmake --preset "$SAW2_SDK_PRESET" -S "$source_dir" \
-    -DCMAKE_C_COMPILER:FILEPATH="$CLANG_C" \
-    -DCMAKE_CXX_COMPILER:FILEPATH="$CLANG_CXX"
-  saw2_run cmake --build "$source_dir/out/build/$SAW2_SDK_PRESET" \
-    --target install --parallel "$JOBS"
-  SDK_PREFIX_OVERRIDE="$install_prefix"
-}
+readonly SDK_PREFIX="$SDK_SOURCE/out/install/$SAW2_SDK_PRESET"
 
-if [[ -n "$SDK_SOURCE" ]]; then
-  SDK_SOURCE="$(cd -- "$SDK_SOURCE" 2>/dev/null && pwd -P)" ||
-    saw2_die "SDK source directory does not exist"
-  build_sdk_source "$SDK_SOURCE"
-fi
+saw2_info "building local ReXGlue SDK: $SDK_SOURCE"
+saw2_run cmake --preset "$SAW2_SDK_PRESET" -S "$SDK_SOURCE" \
+  -DCMAKE_C_COMPILER:FILEPATH="$CLANG_C" \
+  -DCMAKE_CXX_COMPILER:FILEPATH="$CLANG_CXX"
+saw2_run cmake --build "$SDK_SOURCE/out/build/$SAW2_SDK_PRESET" \
+  --target install --parallel "$JOBS"
 
-if [[ -n "$SDK_PREFIX_OVERRIDE" ]]; then
-  export REXGLUE_SDK_PREFIX="$SDK_PREFIX_OVERRIDE"
-fi
+readonly REXGLUE_CLI="$SDK_PREFIX/bin/rexglue"
+[[ -x "$REXGLUE_CLI" ]] ||
+  saw2_die "local ReXGlue CLI was not installed: $REXGLUE_CLI"
 
-if ! saw2_discover_sdk; then
-  ((BOOTSTRAP_SDK)) ||
-    saw2_die "ReXGlue SDK not found; use --sdk-prefix, --sdk-source or --bootstrap-sdk"
-  SDK_SOURCE="$ROOT_DIR/.deps/rexglue-sdk"
-  if [[ ! -d "$SDK_SOURCE" ]]; then
-    saw2_run git clone --recursive "$SAW2_REXGLUE_REPOSITORY" "$SDK_SOURCE"
-    saw2_run git -C "$SDK_SOURCE" checkout --detach "$SAW2_REXGLUE_COMMIT"
-  elif [[ -e "$SDK_SOURCE/.git" ]]; then
-    sdk_head="$(git -C "$SDK_SOURCE" rev-parse HEAD)"
-    [[ "$sdk_head" == "$SAW2_REXGLUE_COMMIT" ]] ||
-      saw2_die ".deps SDK is at $sdk_head, expected $SAW2_REXGLUE_COMMIT"
-  fi
-  build_sdk_source "$SDK_SOURCE"
-  export REXGLUE_SDK_PREFIX="$SDK_PREFIX_OVERRIDE"
-  saw2_discover_sdk || saw2_die "installed SDK could not be rediscovered"
-fi
-saw2_verify_sdk
+saw2_info "ReXGlue CLI: $REXGLUE_CLI ($("$REXGLUE_CLI" --version | sed -n '1p'))"
+saw2_info "ReXGlue prefix: $SDK_PREFIX"
 
-saw2_info "ReXGlue CLI: $SAW2_REXGLUE_CLI ($("$SAW2_REXGLUE_CLI" --version | sed -n '1p'))"
-saw2_info "ReXGlue prefix: $SAW2_SDK_PREFIX"
+SAW2_FPS_MODE="${SAW2_FPS:-60}"
+case "${SAW2_FPS_MODE,,}" in
+  unlimited|uncapped|0)
+    SAW2_FPS_BYTE="00"
+    SAW2_FPS_LABEL="unlimited"
+    ;;
+  60)
+    SAW2_FPS_BYTE="01"
+    SAW2_FPS_LABEL="60 FPS"
+    ;;
+  30)
+    SAW2_FPS_BYTE="02"
+    SAW2_FPS_LABEL="30 FPS"
+    ;;
+  *)
+    saw2_die "SAW2_FPS must be 30, 60, or unlimited"
+    ;;
+esac
 
-if ((CHECK_ONLY)); then
-  saw2_info "environment check passed; no codegen/configure/build performed"
-  exit 0
-fi
+# Saw II: Flesh & Blood patches by Sowa_95:
+#   0x825243FC = 0x60000000   Unlock framerate limiter (PPC NOP)
+#   0x82A2A3C7 = 00/01/02     unlimited / 60 FPS / 30 FPS
+#   0x8296CB74 = 0x38A00010   16x anisotropic filtering
+SAW2_BINARY_PATCHES="825243FC:60000000,82A2A3C7:$SAW2_FPS_BYTE"
+case "${SAW2_AF16X:-1}" in
+  1|true|TRUE|yes|YES|on|ON)
+    SAW2_BINARY_PATCHES="$SAW2_BINARY_PATCHES,8296CB74:38A00010"
+    SAW2_AF_LABEL="16x"
+    ;;
+  0|false|FALSE|no|NO|off|OFF)
+    SAW2_AF_LABEL="default"
+    ;;
+  *)
+    saw2_die "SAW2_AF16X must be 0/1, false/true, off/on"
+    ;;
+esac
+
+# Must remain exported through the CMake-generated codegen step too.
+export REXGLUE_BINARY_PATCHES="$SAW2_BINARY_PATCHES"
+saw2_info "Saw II patches: FPS=$SAW2_FPS_LABEL, anisotropic=$SAW2_AF_LABEL"
+saw2_info "pre-codegen bytes: $REXGLUE_BINARY_PATCHES"
 
 saw2_prepare_logs
 BUILD_LOG="$ROOT_DIR/logs/build-$(saw2_timestamp)-$$.log"
@@ -316,22 +273,20 @@ CODEGEN_LOG="$ROOT_DIR/logs/codegen-$(saw2_timestamp)-$$.log"
 saw2_info "build log: $BUILD_LOG"
 exec > >(tee "$BUILD_LOG") 2>&1
 
-# Normal codegen is stamp-aware and cheap when current. Running it before
-# configure is essential on a clean tree so CMake sees every generated TU.
-saw2_run "$SAW2_REXGLUE_CLI" --log-level info --log-file "$CODEGEN_LOG" \
+saw2_run "$REXGLUE_CLI" --log-level info --log-file "$CODEGEN_LOG" \
   codegen "$SAW2_MANIFEST"
 
 declare -a configure_extra=(
   -DCMAKE_C_COMPILER:FILEPATH="$CLANG_C"
   -DCMAKE_CXX_COMPILER:FILEPATH="$CLANG_CXX"
+  -DCMAKE_PREFIX_PATH:PATH="$SDK_PREFIX"
+  -Drexglue_DIR:PATH="$(saw2_config_from_prefix "$SDK_PREFIX")"
 )
+
 if ((CLEAN)); then
   configure_extra+=(--fresh)
 fi
-saw2_print_command cmake --preset "$PRESET" -S "$ROOT_DIR" \
-  -DCMAKE_PREFIX_PATH:PATH="$SAW2_SDK_PREFIX" \
-  -Drexglue_DIR:PATH="$(saw2_config_from_prefix "$SAW2_SDK_PREFIX")" \
-  "${configure_extra[@]}"
+
 saw2_cmake_configure "$PRESET" "${configure_extra[@]}"
 
 declare -a build_command=(cmake --build "$BUILD_DIR" --parallel "$JOBS")
@@ -342,66 +297,61 @@ saw2_run "${build_command[@]}"
 
 BINARY_PATH="$BUILD_DIR/saw2"
 
-# ReXGlue 0.10 ships the runtime and Xenos backend as SDK libraries.
-# The game target itself only links the executable; it does not rebuild
-# librexgpu-xenos.so in the project build directory. Resolve both shared
-# libraries from the selected SDK and stage them beside the executable.
 find_sdk_library() {
   local library_name="$1"
   local candidate=""
   for candidate in \
-    "$SAW2_SDK_PREFIX/lib/$library_name" \
-    "$SAW2_SDK_PREFIX/lib64/$library_name"; do
+    "$SDK_PREFIX/lib/$library_name" \
+    "$SDK_PREFIX/lib64/$library_name"; do
     if [[ -f "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
-  find "$SAW2_SDK_PREFIX" -type f -name "$library_name" -print -quit 2>/dev/null
+  find "$SDK_PREFIX" -type f -name "$library_name" -print -quit 2>/dev/null
 }
 
 case "$BUILD_KIND" in
   debug)
     GPU_PLUGIN_NAME="librexgpu-xenosd.so"
+    RUNTIME_NAME="librexruntimed.so"
     ;;
   relwithdebinfo)
     GPU_PLUGIN_NAME="librexgpu-xenosrd.so"
+    RUNTIME_NAME="librexruntimerd.so"
     ;;
   release)
     GPU_PLUGIN_NAME="librexgpu-xenos.so"
+    RUNTIME_NAME="librexruntime.so"
     ;;
-  *)
-    saw2_die "unsupported build kind while selecting Xenos plugin: $BUILD_KIND"
-    ;;
+  *) saw2_die "unsupported build kind: $BUILD_KIND" ;;
 esac
 
-RUNTIME_PATH="$(find_sdk_library librexruntime.so || true)"
+RUNTIME_PATH="$(find_sdk_library "$RUNTIME_NAME" || true)"
 PLUGIN_PATH="$(find_sdk_library "$GPU_PLUGIN_NAME" || true)"
+
 [[ -x "$BINARY_PATH" ]] || saw2_die "build produced no executable: $BINARY_PATH"
 [[ -n "$RUNTIME_PATH" && -f "$RUNTIME_PATH" ]] ||
-  saw2_die "selected SDK has no librexruntime.so: $SAW2_SDK_PREFIX"
+  saw2_die "local SDK has no $RUNTIME_NAME"
 [[ -n "$PLUGIN_PATH" && -f "$PLUGIN_PATH" ]] ||
-  saw2_die "selected SDK has no $GPU_PLUGIN_NAME for $BUILD_KIND: $SAW2_SDK_PREFIX"
-saw2_info "ReXGlue runtime: $RUNTIME_PATH"
-saw2_info "Xenos plugin ($BUILD_KIND): $PLUGIN_PATH"
+  saw2_die "local SDK has no $GPU_PLUGIN_NAME"
 
 mkdir -p -- "$STAGE_DIR"
 saw2_run install -m 0755 "$BINARY_PATH" "$STAGE_DIR/saw2"
 saw2_run install -m 0755 "$PLUGIN_PATH" "$STAGE_DIR/$GPU_PLUGIN_NAME"
-saw2_run install -m 0755 "$RUNTIME_PATH" "$STAGE_DIR/librexruntime.so"
+saw2_run install -m 0755 "$RUNTIME_PATH" "$STAGE_DIR/$RUNTIME_NAME"
+
+for stale_runtime in librexruntime.so librexruntimed.so librexruntimerd.so; do
+  [[ "$stale_runtime" == "$RUNTIME_NAME" ]] && continue
+  rm -f "$STAGE_DIR/$stale_runtime"
+done
+
 if [[ -L "$ROOT_DIR/out/stage/current" || ! -e "$ROOT_DIR/out/stage/current" ]]; then
   saw2_run ln -sfn "$PRESET" "$ROOT_DIR/out/stage/current"
-else
-  saw2_warn "out/stage/current is not a symlink; leaving it unchanged"
-fi
-
-if command -v ldd >/dev/null 2>&1 &&
-   LD_LIBRARY_PATH="$STAGE_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-     ldd "$STAGE_DIR/saw2" | grep -q 'not found'; then
-  saw2_die "staged executable has unresolved shared libraries"
 fi
 
 printf '\n'
 saw2_info "build successful"
+saw2_info "local SDK: $SDK_SOURCE"
 saw2_info "executable: $STAGE_DIR/saw2"
-saw2_info "launch from the project root with: ./run.sh"
+saw2_info "launch from project root with: ./run.sh"

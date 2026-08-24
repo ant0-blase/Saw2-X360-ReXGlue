@@ -11,6 +11,12 @@ game_root = "game"
 file_path = "game/Default.xex"
 out_directory_path = "generated/default"
 includes = []
+cr_as_local = true
+ctr_as_local = true
+xer_as_local = true
+
+[entrypoint.rexcrt]
+memcpy = 0x82B90890
 
 # Proven against this exact Saw II XEX (SHA-256 0bb765d0...a6092883):
 # 0x82A6D088 is a five-instruction copy helper ending in blr at

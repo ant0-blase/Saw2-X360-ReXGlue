@@ -225,6 +225,8 @@ declare -a RUNTIME_ARGS=(
   "--input_backend=sdl"
   "--resolution=$ACTIVE_RESOLUTION"
   "--log_file=$LOG_FILE"
+  "--execute_unclipped_draw_vs_on_cpu=true"
+  "--execute_unclipped_draw_vs_on_cpu_with_scissor=true"
 )
 
 if ((DEBUG_LOGGING)); then
